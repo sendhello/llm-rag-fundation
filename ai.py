@@ -2,6 +2,9 @@ from typing import Generator, AsyncGenerator
 
 from anthropic import AsyncAnthropic
 from anthropic.types import Message, Model
+from fastapi.exceptions import ValidationException
+from prompts import REVIEW_SYSTEM_PROMPT
+
 from settings import Settings
 from schema import JobInfo, Chat, ReviewResult, ReviewResultElement
 from enum import StrEnum
@@ -44,6 +47,7 @@ class ClaudeRepo:
         logger.info(f"{response.usage.input_tokens} input and {response.usage.output_tokens} output tokens used.")
         if response.stop_reason != "tool_use":
             logger.error(f"Stop reason is `{response.stop_reason}`")
+            ValidationException("Stop reason is not `tool_use`")
 
         tool_use_block = next(c for c in response.content if c.type == "tool_use")
         return JobInfo.model_validate(tool_use_block.input)
@@ -71,16 +75,17 @@ class ClaudeRepo:
         response = await self._client.messages.create(
             model=ClaudeModel.sonnet.value,
             max_tokens=1024,
-            system="You are a senior software python engineer. Make a review of this code.",
+            system=[{
+                "type": "text",
+                "text": REVIEW_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }],
             messages=[{
                 "role": "user",
                 "content": f"{code}",
             }],
             tools=tools,
             tool_choice={"type": "tool", "name": "code_review"},
-            cache_control={
-                "type": "ephemeral",
-            },
         )
         logger.info(f"{response.usage.input_tokens=}")
         logger.info(f"{response.usage.output_tokens=}")
@@ -88,6 +93,7 @@ class ClaudeRepo:
         logger.info(f"{response.usage.cache_read_input_tokens=}")
         if response.stop_reason != "tool_use":
             logger.error(f"Stop reason is `{response.stop_reason}`")
+            ValidationException("Stop reason is not `tool_use`")
 
         tool_use_block = next(c for c in response.content if c.type == "tool_use")
         return ReviewResult.model_validate(tool_use_block.input)
