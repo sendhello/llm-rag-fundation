@@ -47,7 +47,7 @@ class ClaudeRepo:
         logger.info(f"{response.usage.input_tokens} input and {response.usage.output_tokens} output tokens used.")
         if response.stop_reason != "tool_use":
             logger.error(f"Stop reason is `{response.stop_reason}`")
-            ValidationException("Stop reason is not `tool_use`")
+            raise ValidationException("Stop reason is not `tool_use`")
 
         tool_use_block = next(c for c in response.content if c.type == "tool_use")
         return JobInfo.model_validate(tool_use_block.input)
@@ -93,7 +93,7 @@ class ClaudeRepo:
         logger.info(f"{response.usage.cache_read_input_tokens=}")
         if response.stop_reason != "tool_use":
             logger.error(f"Stop reason is `{response.stop_reason}`")
-            ValidationException("Stop reason is not `tool_use`")
+            raise ValidationException("Stop reason is not `tool_use`")
 
         tool_use_block = next(c for c in response.content if c.type == "tool_use")
         return ReviewResult.model_validate(tool_use_block.input)
