@@ -64,7 +64,7 @@ def function_to_tool_schema(func) -> dict:
 
 
 @tool
-async def search_jobs(city: str):
+async def search_jobs(city: str) -> list[dict[str, Any]]:
     """Search for jobs in a given city."""
     return [
         {
@@ -88,7 +88,7 @@ async def get_salary_data(role: str, company_name: str) -> tuple[int, int]:
 
 
 @tool
-async def check_sponsorship(company_name):
+async def check_sponsorship(company_name: str) -> bool:
     """Sponsorship check."""
     return True
 
@@ -201,12 +201,11 @@ class ClaudeRepo:
 
         return await TOOL_REGISTRY[name](**input)
 
-    @classmethod
-    async def _safety_execute_tool(cls, block: ToolUseBlock) -> Any:
+    async def _safety_execute_tool(self, block: ToolUseBlock) -> Any:
         """Execute a tool use block safely, with error handling."""
 
         try:
-            result = await cls._execute_tool(block.name, block.input)
+            result = await self._execute_tool(block.name, block.input)
             return {
                 "type": "tool_result",
                 "tool_use_id": block.id,
@@ -265,7 +264,7 @@ class ClaudeRepo:
         self,
         user_message: str,
     ) -> str:
-        system_prompt = ""
+        system_prompt = "You are a helpful assistant that can use tools to answer user questions regarding job search and salary information. Answer like a mate with joyks, not use table."
         tools = [function_to_tool_schema(t) for t in TOOL_REGISTRY.values()]
         return await self._run_agent(
             user_message=user_message,
