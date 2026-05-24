@@ -1,6 +1,10 @@
+from typing import Any
+
 from fastapi import FastAPI, Depends
 from fastapi.responses import StreamingResponse
 from anthropic import Anthropic
+from starlette.responses import JSONResponse
+
 from ai import ClaudeRepo, get_clause_repo
 import logging
 
@@ -39,4 +43,13 @@ async def chat_stream(
 async def analyze(
     code: str, clause_repo: ClaudeRepo = Depends(get_clause_repo),
 ) -> ReviewResult:
-    return await clause_repo.analise(code)
+    return await clause_repo.analyze(code)
+
+
+@app.post("/agent")
+async def agent(
+    text: str, clause_repo: ClaudeRepo = Depends(get_clause_repo),
+) -> dict[str, str]:
+    return {
+        "text": await clause_repo.agent(text)
+    }
