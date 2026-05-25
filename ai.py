@@ -1,11 +1,13 @@
 import asyncio
+from asyncio import Semaphore
+from contextlib import asynccontextmanager
 from typing import Generator, AsyncGenerator, Any
 import json
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, omit, APIError
 from anthropic.types import Message, Model, ToolUseBlock
 from fastapi.exceptions import ValidationException
 from prompts import REVIEW_SYSTEM_PROMPT
-
+from fastapi import Request
 from settings import settings, Settings
 from schema import JobInfo, Chat, ReviewResult, ReviewResultElement
 from enum import StrEnum
@@ -18,6 +20,31 @@ logger = logging.getLogger(__name__)
 
 
 TOOL_REGISTRY = {}
+
+
+class ClaudeModel(StrEnum):
+    haiku = "claude-haiku-4-5"
+    sonnet = "claude-sonnet-4-6"
+    opus = "claude-opus-4-7"
+    mythos = "claude-mythos-preview"
+
+
+PRICING = {
+    ClaudeModel.haiku: {"input": 1.00, "output": 5.00},  # $ per 1M токенов
+    ClaudeModel.sonnet: {"input": 3.00, "output": 15.00},
+    ClaudeModel.opus: {"input": 5.00, "output": 25.00},
+}
+
+
+def calculate_cost(model: ClaudeModel, usage) -> float:
+    price = PRICING[model]
+    input_cost = (usage.input_tokens / 1_000_000) * price["input"]
+    output_cost = (usage.output_tokens / 1_000_000) * price["output"]
+    # Cache read ~10% от input цены
+    cache_cost = (
+        ((usage.cache_read_input_tokens or 0) / 1_000_000) * price["input"] * 0.1
+    )
+    return input_cost + output_cost + cache_cost
 
 
 def tool(func):
@@ -93,20 +120,59 @@ async def check_sponsorship(company_name: str) -> bool:
     return True
 
 
-class ClaudeModel(StrEnum):
-    haiku = "claude-haiku-4-5"
-    sonnet = "claude-sonnet-4-6"
-    opus = "claude-opus-4-7"
-    mythos = "claude-mythos-preview"
-
-
-class ClaudeRepo:
+class AnthropicClient:
     def __init__(self):
         self._client = AsyncAnthropic(
             api_key=settings.anthropic_api_key.strip(), max_retries=3
         )
+        self._semaphore = Semaphore(settings.max_concurrent_requests)
+
+    async def create_message(
+        self,
+        model: ClaudeModel,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 1024,
+        system: str | list[dict] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: dict[str, Any] | None = None,
+        temperature: float | None = None,
+    ):
+        async with self._semaphore:
+            response = await self._client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=system or omit,
+                messages=messages,
+                tools=tools or omit,
+                tool_choice=tool_choice or omit,
+                temperature=temperature or omit,
+            )
+            return response
+
+    @asynccontextmanager
+    async def stream(
+        self,
+        model: ClaudeModel,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 1024,
+        system: str | None = None,
+    ):
+        async with self._semaphore:
+            async with self._client.messages.stream(
+                model=model,
+                max_tokens=max_tokens,
+                messages=messages,
+                system=system or omit,
+            ) as stream:
+                yield stream
+
+
+class ClaudeRepo:
+    def __init__(self):
+        self._client = AnthropicClient()
 
     async def extract_job_info(self, job_description: str) -> JobInfo:
+        model = ClaudeModel.haiku
         tools = [
             {
                 "name": "extract_job_info",
@@ -114,8 +180,8 @@ class ClaudeRepo:
                 "input_schema": JobInfo.model_json_schema(),
             }
         ]
-        response = await self._client.messages.create(
-            model=ClaudeModel.haiku.value,
+        response = await self._client.create_message(
+            model=model,
             max_tokens=1024,
             system="You are a helpful assistant that extracts job information from a job description.",
             messages=[
@@ -128,9 +194,14 @@ class ClaudeRepo:
             tool_choice={"type": "tool", "name": "extract_job_info"},
             temperature=0.0,
         )
+        cost = calculate_cost(model, response.usage)
         logger.info(
-            f"{response.usage.input_tokens} input and {response.usage.output_tokens} output tokens used."
+            f"input={response.usage.input_tokens}, "
+            f"output={response.usage.output_tokens}, "
+            f"cache_read={response.usage.cache_read_input_tokens or 0}"
+            f"Total cost: ${cost:.6f}"
         )
+
         if response.stop_reason != "tool_use":
             logger.error(f"Stop reason is `{response.stop_reason}`")
             raise ValidationException("Stop reason is not `tool_use`")
@@ -138,23 +209,46 @@ class ClaudeRepo:
         tool_use_block = next(c for c in response.content if c.type == "tool_use")
         return JobInfo.model_validate(tool_use_block.input)
 
-    async def send_to_chat(self, chat: Chat) -> AsyncGenerator[str, None]:
-        async with self._client.messages.stream(
-            model=ClaudeModel.sonnet.value,
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": chat.message,
-                }
-            ],
-        ) as stream:
-            async for message in stream.text_stream:
-                yield f"data: {message}\n\n"
+    async def send_to_chat(
+        self, request: Request, chat: Chat
+    ) -> AsyncGenerator[str, None]:
+        """Send a message to the chat and stream the response back to the client."""
 
+        try:
+            async with self._client.stream(
+                model=ClaudeModel.sonnet,
+                max_tokens=1024,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": chat.message,
+                    }
+                ],
+            ) as stream:
+                async for message in stream.text_stream:
+                    if request.is_disconnected():
+                        logger.info("Client disconnected, stopping stream.")
+                        break
+
+                    yield f"data: {message}\n\n"
+
+        except APIError as e:
+            logger.error(f"Anthropic API error: {e}")
+            yield f"data: [ERROR] {str(e)}\n\n"
+
+        finally:
             yield "data: [DONE]\n\n"
+            full_message = await stream.get_final_message()
+            cost = calculate_cost(ClaudeModel.sonnet, full_message.usage)
+            logger.info(
+                f"input={full_message.usage.input_tokens}, "
+                f"output={full_message.usage.output_tokens}, "
+                f"cache_read={full_message.usage.cache_read_input_tokens or 0}"
+                f"Total cost: ${cost:.6f}"
+            )
 
     async def analyze(self, code: str) -> ReviewResult:
+        model = ClaudeModel.sonnet
         tools = [
             {
                 "name": "code_review",
@@ -162,8 +256,8 @@ class ClaudeRepo:
                 "input_schema": ReviewResult.model_json_schema(),
             }
         ]
-        response = await self._client.messages.create(
-            model=ClaudeModel.sonnet.value,
+        response = await self._client.create_message(
+            model=model,
             max_tokens=1024,
             system=[
                 {
@@ -181,10 +275,14 @@ class ClaudeRepo:
             tools=tools,
             tool_choice={"type": "tool", "name": "code_review"},
         )
-        logger.info(f"{response.usage.input_tokens=}")
-        logger.info(f"{response.usage.output_tokens=}")
-        logger.info(f"{response.usage.cache_creation_input_tokens=}")
-        logger.info(f"{response.usage.cache_read_input_tokens=}")
+        cost = calculate_cost(model, response.usage)
+        logger.info(
+            f"input={response.usage.input_tokens}, "
+            f"output={response.usage.output_tokens}, "
+            f"cache_read={response.usage.cache_read_input_tokens or 0}"
+            f"Total cost: ${cost:.6f}"
+        )
+
         if response.stop_reason != "tool_use":
             logger.error(f"Stop reason is `{response.stop_reason}`")
             raise ValidationException("Stop reason is not `tool_use`")
@@ -227,20 +325,24 @@ class ClaudeRepo:
         system_prompt: str,
         max_iterations: int = settings.max_agent_iterations,
     ) -> str:
+        model = ClaudeModel.sonnet
         messages = [{"role": "user", "content": user_message}]
         for iteration in range(max_iterations):
-            logger.debug(f"Agent iteration {iteration} with messages: {messages}")
-
-            response = await self._client.messages.create(
-                model=ClaudeModel.sonnet.value,
+            response = await self._client.create_message(
+                model=model,
                 max_tokens=4096,
                 system=system_prompt,
                 tools=tools,
                 messages=messages,
             )
             messages.append({"role": "assistant", "content": response.content})
+            cost = calculate_cost(model, response.usage)
             logger.info(
-                f"Iteration {iteration}: {response.usage.input_tokens} input and {response.usage.output_tokens} output tokens used."
+                f"Iteration {iteration}: \n"
+                f"input={response.usage.input_tokens}, \n"
+                f"output={response.usage.output_tokens}, \n"
+                f"cache_read={response.usage.cache_read_input_tokens or 0} \n"
+                f"Total cost: ${cost:.6f}"
             )
 
             if response.stop_reason == "tool_use":
@@ -264,7 +366,16 @@ class ClaudeRepo:
         self,
         user_message: str,
     ) -> str:
-        system_prompt = "You are a helpful assistant that can use tools to answer user questions regarding job search and salary information. Answer like a mate with joyks, not use table."
+        prompt_text = ("You are a helpful assistant that can use tools to answer user "
+                "questions regarding job search and salary information. "
+                "Answer like a mate with jokes, not use table. ") * 50  # multiply for test cache
+        system_prompt = [
+            {
+                "type": "text",
+                "text": prompt_text,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
         tools = [function_to_tool_schema(t) for t in TOOL_REGISTRY.values()]
         return await self._run_agent(
             user_message=user_message,

@@ -1,6 +1,6 @@
 from typing import Any
-
-from fastapi import FastAPI, Depends
+from settings import settings
+from fastapi import FastAPI, Depends, Request
 from fastapi.responses import StreamingResponse
 from anthropic import Anthropic
 from starlette.responses import JSONResponse
@@ -34,22 +34,43 @@ async def extract(
 
 @app.post("/chat/stream")
 async def chat_stream(
-    chat: Chat, clause_repo: ClaudeRepo = Depends(get_clause_repo),
+    chat: Chat,
+    request: Request,
+    clause_repo: ClaudeRepo = Depends(get_clause_repo),
 ) -> StreamingResponse:
-    return StreamingResponse(clause_repo.send_to_chat(chat), media_type="text/event-stream")
+    return StreamingResponse(
+        clause_repo.send_to_chat(request=request, chat=chat),
+        media_type="text/event-stream",
+    )
 
 
 @app.post("/analyze")
 async def analyze(
-    code: str, clause_repo: ClaudeRepo = Depends(get_clause_repo),
+    code: str,
+    clause_repo: ClaudeRepo = Depends(get_clause_repo),
 ) -> ReviewResult:
+    if len(code) > settings.max_input_chars:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": f"Input exceeds maximum length of {settings.max_input_chars} characters."
+            },
+        )
+
     return await clause_repo.analyze(code)
 
 
 @app.post("/agent")
 async def agent(
-    text: str, clause_repo: ClaudeRepo = Depends(get_clause_repo),
+    text: str = "Find Python jobs in Melbourne and check if they offer sponsorship",
+    clause_repo: ClaudeRepo = Depends(get_clause_repo),
 ) -> dict[str, str]:
-    return {
-        "text": await clause_repo.agent(text)
-    }
+    if len(text) > settings.max_input_chars:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": f"Input exceeds maximum length of {settings.max_input_chars} characters."
+            },
+        )
+
+    return {"text": await clause_repo.agent(text)}

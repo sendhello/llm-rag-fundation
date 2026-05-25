@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, RootModel
 from enum import StrEnum
 from typing import Literal
+from settings import settings
 
 
 class JobType(StrEnum):
@@ -37,16 +38,29 @@ class JobInfo(BaseModel):
 
 
 class JobDescription(BaseModel):
-    text: str
+    text: str = Field(
+        ...,
+        description="The full text of the job description to be analyzed.",
+        max_length=settings.max_input_chars,
+    )
 
 
 class Chat(BaseModel):
     chat_id: str
-    message: str
+    message: str = Field(
+        ...,
+        description="The message to be sent to the chat model.",
+        max_length=settings.max_input_chars,
+    )
+
 
 class ReviewResultElement(BaseModel):
-    line: int | None = Field(None, description="The line number of the code that was reviewed.")
-    code_of_line: str | None = Field(None, description="The code line that was reviewed.")
+    line: int | None = Field(
+        None, description="The line number of the code that was reviewed."
+    )
+    code_of_line: str | None = Field(
+        None, description="The code line that was reviewed."
+    )
     review: str | None = Field(None, description="The review of the code line.")
 
 
