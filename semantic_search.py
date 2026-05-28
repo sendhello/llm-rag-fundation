@@ -77,7 +77,7 @@ def search(query, top_k=3, embed_model: str = settings.embed_model):
     )
     scores = [cosine_similarity(embedded_query, e_doc) for e_doc in EMBEDDED_DATA]
     top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
-    return top_indices
+    return [(i, scores[i], VACANCIES[i]) for i in top_indices]
 
 
 def main():
