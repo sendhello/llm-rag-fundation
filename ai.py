@@ -123,7 +123,7 @@ async def check_sponsorship(company_name: str) -> bool:
 class AnthropicClient:
     def __init__(self):
         self._client = AsyncAnthropic(
-            api_key=settings.anthropic_api_key.strip(), max_retries=3
+            api_key=settings.claude_api_key.strip(), max_retries=3
         )
         self._semaphore = Semaphore(settings.max_concurrent_requests)
 
