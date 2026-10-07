@@ -1,14 +1,17 @@
 from openai import OpenAI
-from sentence_transformers import SentenceTransformer
-from voyageai import Client
+# from sentence_transformers import SentenceTransformer
+from voyageai import Client, AsyncClient
 import numpy as np
+
+from ai import logger
 from settings import settings
 from constants import VACANCIES, QUERY
 
 
 openai = OpenAI(api_key=settings.openai_api_key)
-transformer = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+# transformer = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 voyageai = Client(api_key=settings.voyage_api_key)
+async_voyageai = AsyncClient(api_key=settings.voyage_api_key)
 
 EMBEDDED_DATA = []
 
@@ -25,14 +28,20 @@ def _voyage_embed(text: str) -> list[float]:
     return voyageai.embed([text], model="voyage-4-large").embeddings[0]
 
 
-def _transform_embed(text: str) -> list[float]:
-    return transformer.encode(text).tolist()
+async def _async_voyage_embed(texts: list[str]) -> list[list[float]]:
+    response = await async_voyageai.embed(texts, model="voyage-4-large")
+    logger.info(f"Spends tokens for embedding: {response.total_tokens}")
+    return response.embeddings
+
+
+# def _transform_embed(text: str) -> list[float]:
+#     return transformer.encode(text).tolist()
 
 
 EMBED_MAP = {
     "voyage": _voyage_embed,
     "openai": _openai_embed,
-    "transform": _transform_embed,
+    # "transform": _transform_embed,
 }
 
 
@@ -41,6 +50,10 @@ def embed(text: str, embed_model: str = settings.embed_model) -> list[float]:
         raise ValueError(f"Invalid embed type: {embed_model}")
 
     return EMBED_MAP[embed_model](text)
+
+
+async def async_embed(texts: list[str], embed_model: str = settings.embed_model) -> list[list[float]]:
+    return await _async_voyage_embed(texts)
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

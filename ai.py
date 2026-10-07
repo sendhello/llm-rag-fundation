@@ -6,8 +6,9 @@ import json
 from anthropic import AsyncAnthropic, omit, APIError
 from anthropic.types import Message, Model, ToolUseBlock
 from fastapi.exceptions import ValidationException
-from prompts import REVIEW_SYSTEM_PROMPT
+from prompts import REVIEW_SYSTEM_PROMPT, RERANK_SYSTEM_PROMPT, RAG_SYSTEM_PROMPT
 from fastapi import Request
+import random
 from settings import settings, Settings
 from schema import JobInfo, Chat, ReviewResult, ReviewResultElement
 from enum import StrEnum
@@ -24,7 +25,7 @@ TOOL_REGISTRY = {}
 
 class ClaudeModel(StrEnum):
     haiku = "claude-haiku-4-5"
-    sonnet = "claude-sonnet-4-6"
+    sonnet = "claude-sonnet-5-5"
     opus = "claude-opus-4-7"
     mythos = "claude-mythos-preview"
 
@@ -289,6 +290,119 @@ class ClaudeRepo:
 
         tool_use_block = next(c for c in response.content if c.type == "tool_use")
         return ReviewResult.model_validate(tool_use_block.input)
+
+    async def rerank(self, query: str, candidates: list, top_k: int = 5, min_relevance: int = 2) -> list[tuple[str, int]]:
+        model = ClaudeModel.haiku
+        tools = [{
+            "name": "rank_documents",
+            "strict": True,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "rankings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "index": {"type": "integer"},
+                                "reason": {"type": "string"},
+                                "relevance": {
+                                    "type": "integer",
+                                    "enum": [0, 1, 2, 3],
+                                    "description": "0-3 relevance score",
+                                },
+                            },
+                            "required": ["index", "reason", "relevance"],
+                            "additionalProperties": False,
+                        }
+                    }
+                },
+                "required": ["rankings"],
+                "additionalProperties": False,
+            }
+        }]
+
+        # Shuffle candidates
+        order = list(range(len(candidates)))
+        random.shuffle(order)
+        shuffled = [candidates[i] for i in order]
+
+        response = await self._client.create_message(
+            model=model,
+            max_tokens=4096,
+            system=[
+                {
+                    "type": "text",
+                    "text": RERANK_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"<query>{query}</query>\n\n"
+                    f"<candidates>\n{self._build_candidates_block(shuffled)}\n</candidates>"
+                ),
+            }],
+            tools=tools,
+            tool_choice={"type": "tool", "name": "rank_documents"},
+        )
+        if response.stop_reason != "tool_use":
+            logger.error(f"Stop reason is `{response.stop_reason}`")
+            raise ValidationException("Stop reason is not `tool_use`")
+
+        tool_block = next(b for b in response.content if b.type == "tool_use")
+        scores: dict[int, int] = {}
+        for item in tool_block.input["rankings"]:
+            idx = item["index"]
+            scores[int(idx)] = item["relevance"]
+
+        ranked = sorted(
+            ((next(c for c in candidates if c.id == candidate.id), scores.get(candidate.id, 0)) for candidate in candidates),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        return [(doc, rate) for doc, rate in ranked if rate >= min_relevance][:top_k]
+
+    async def generate_answer(self, query: str, chunks: list[tuple[str, int]]) -> str:
+        context = self._build_context(chunks)
+
+        response = await self._client.create_message(
+            model=ClaudeModel.sonnet,
+            max_tokens=4096,
+            system=[{
+                "type": "text",
+                "text": RAG_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"}
+            }],
+            messages=[{
+                "role": "user",
+                "content": f"Documents:\n\n{context}\n\nQuestion: {query}"
+            }]
+        )
+        if response.stop_reason != "end_turn":
+            logger.error(f"Stop reason is `{response.stop_reason}`")
+            raise ValidationException("Stop reason is not `end_turn`")
+
+        return "".join(block.text for block in response.content if block.type == "text")
+
+    @staticmethod
+    def _build_candidates_block(candidates: list, max_chars: int = 2000) -> str:
+        return "\n\n".join(
+            f'<document index="{doc.id}">\n{doc.content[:max_chars]}\n</document>'
+            for doc in candidates
+        )
+
+    @staticmethod
+    def _build_context(chunks: list[tuple[str, int]]) -> str:
+        parts = []
+        for doc, relevance in chunks:
+            parts.append(
+                f'<document index="{doc.id}" relevance="{relevance}">\n'
+                f'{doc.content}\n'
+                f'</document>'
+            )
+        return "\n\n".join(parts)
 
     @staticmethod
     async def _execute_tool(name: str, input: dict) -> Any:
