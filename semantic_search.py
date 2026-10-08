@@ -2,7 +2,7 @@ from openai import OpenAI
 # from sentence_transformers import SentenceTransformer
 from voyageai import Client, AsyncClient
 import numpy as np
-
+from typing import Literal
 from ai import logger
 from settings import settings
 from constants import VACANCIES, QUERY
@@ -28,8 +28,8 @@ def _voyage_embed(text: str) -> list[float]:
     return voyageai.embed([text], model="voyage-4-large").embeddings[0]
 
 
-async def _async_voyage_embed(texts: list[str]) -> list[list[float]]:
-    response = await async_voyageai.embed(texts, model="voyage-4-large")
+async def _async_voyage_embed(texts: list[str], input_type: Literal["document", "query"]) -> list[list[float]]:
+    response = await async_voyageai.embed(texts, model="voyage-4-large", input_type=input_type)
     logger.info(f"Spends tokens for embedding: {response.total_tokens}")
     return response.embeddings
 
@@ -52,8 +52,8 @@ def embed(text: str, embed_model: str = settings.embed_model) -> list[float]:
     return EMBED_MAP[embed_model](text)
 
 
-async def async_embed(texts: list[str], embed_model: str = settings.embed_model) -> list[list[float]]:
-    return await _async_voyage_embed(texts)
+async def async_embed(texts: list[str], embed_model: str = settings.embed_model, input_type: Literal["document", "query"] = "document") -> list[list[float]]:
+    return await _async_voyage_embed(texts, input_type=input_type)
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:

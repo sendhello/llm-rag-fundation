@@ -168,7 +168,10 @@ async def query(
         )
 
     # Embed the query
-    [embed_query] = await async_embed([text])
+    [embed_query] = await async_embed([text], input_type="query")
+    logger.info(
+        f"Embedding query: {text} -> {embed_query}"
+    )
 
     # Retrieve the top 20 results
     search_result = await search_similar(session, embed_query, top_k=20)
